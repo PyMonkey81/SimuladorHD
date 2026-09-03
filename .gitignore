@@ -1,0 +1,13 @@
+.venv/
+.venv-1/
+venv/
+env/
+__pycache__/
+*.pyc
+build/
+dist/
+*.spec.bak
+.pytest_cache/
+.vscode/*.local.json
+*.log
+config/

@@ -1,6 +1,8 @@
+import os
 import random
 import sys
 import serial
+import serial.tools.list_ports
 import threading
 import struct
 import crcmod
@@ -328,49 +330,11 @@ class QLedIndicator(QWidget):
             """
         self.setStyleSheet(style)
         
-# class Simulator(QWidget):
-#     request_led_update = Signal(int, bool)
 
-#     def __init__(self):
-#         super().__init__()
-#         self.serial_port = None
-#         self.running = False
-#         self.reader_thread = None
 
-#         self.realistic_mode = True  # Simulación con ruido y variación
-
-#         self.current_simulated_values: Dict[int, Dict[int, Any]] = {}
-#         self.led_widgets = {}
-
-#         self._initialize_simulated_values()
-#         self.setup_ui()
-#         self.start_serial("COM14")   # Cambia según tu puerto
-
-#     def _initialize_simulated_values(self):
-#         """Inicialización limpia y realista."""
-#         for group_code, group_vars in VARIABLES.items():
-#             self.current_simulated_values[group_code] = {}
-#             for var_id, info in group_vars.items():
-#                 if 'value' in info:
-#                     self.current_simulated_values[group_code][var_id] = info['value']
-#                 elif info.get("type") == "bool":
-#                     self.current_simulated_values[group_code][var_id] = False
-#                 elif info.get("type") == "string":
-#                     self.current_simulated_values[group_code][var_id] = ""
-#                 else:
-#                     # Valores por defecto realistas
-#                     if "Temp" in info.get("name", "") or "TEMP" in info.get("tag", ""):
-#                         self.current_simulated_values[group_code][var_id] = 37.0
-#                     elif "Cond" in info.get("name", "") or "COND" in info.get("tag", ""):
-#                         self.current_simulated_values[group_code][var_id] = 14.0
-#                     else:
-#                         self.current_simulated_values[group_code][var_id] = 0.0
-
-#         # Valores iniciales importantes
-#         self.current_simulated_values[0x02][2] = 13.0   # Estado proceso
-#         self.current_simulated_values[0x04][7] = 14.2   # Conductividad real
-#         self.current_simulated_values[0x05][7] = 36.8   # Temp EF
-#         self.current_simulated_values[0x05][8] = 37.1   # Temp SF
+def _default_serial_port_name() -> str:
+    """Puerto por defecto segun plataforma (Windows usa COMx, Linux/Ubuntu usa /dev/ttyUSB0)."""
+    return "COM4" if sys.platform.startswith("win") else "/dev/ttyUSB0"
 
 
 class Simulator(QWidget):
@@ -381,6 +345,7 @@ class Simulator(QWidget):
         self.serial_port = None
         self.running = False
         self.reader_thread = None
+        self.serial_port_name = os.environ.get("SIMULATOR_PORT", _default_serial_port_name())
 
         self.realistic_mode = True
 
@@ -390,7 +355,7 @@ class Simulator(QWidget):
 
         self._initialize_simulated_values()
         self.setup_ui()
-        self.start_serial("COM14")   # Cambia según tu puerto
+        self.start_serial(self.serial_port_name)
 
     def _get_var_info(self, group_code: int, var_id: int) -> Dict[str, Any]:
         return VARIABLES.get(group_code, {}).get(var_id, {})
@@ -939,6 +904,49 @@ class Simulator(QWidget):
 
         self.tabs.addTab(tab_doubles, "🔵 Tags Double")
 
+        # ----------------------------------------------------------------
+        # NUEVA PESTAÑA 7: PUERTO SERIAL
+        # ----------------------------------------------------------------
+        tab_serial = QWidget()
+        layout_serial = QVBoxLayout(tab_serial)
+        layout_serial.setContentsMargins(10, 10, 10, 10)
+
+        grp_serial = QGroupBox("Conexión Serial")
+        grp_serial.setStyleSheet("QGroupBox { font-weight: bold; font-size: 14px; }")
+        serial_form = QVBoxLayout(grp_serial)
+
+        row_serial = QHBoxLayout()
+        self.chk_serial_enable = QCheckBox("Habilitar puerto")
+        self.chk_serial_enable.setChecked(True)
+        row_serial.addWidget(self.chk_serial_enable)
+
+        row_serial.addWidget(QLabel("Puerto:"))
+        self.combo_serial_port = QComboBox()
+        self.combo_serial_port.setMinimumWidth(160)
+        row_serial.addWidget(self.combo_serial_port)
+
+        self.btn_refresh_serial = QPushButton("Actualizar puertos")
+        self.btn_refresh_serial.clicked.connect(self._refresh_serial_ports)
+        row_serial.addWidget(self.btn_refresh_serial)
+
+        self.btn_apply_serial = QPushButton("Aplicar")
+        self.btn_apply_serial.clicked.connect(self._apply_serial_settings)
+        row_serial.addWidget(self.btn_apply_serial)
+
+        row_serial.addStretch()
+        serial_form.addLayout(row_serial)
+
+        self.lbl_serial_status = QLabel("Estado: Desconectado")
+        self.lbl_serial_status.setStyleSheet("color: #7f8c8d; font-weight: bold; padding: 5px;")
+        serial_form.addWidget(self.lbl_serial_status)
+
+        layout_serial.addWidget(grp_serial)
+        layout_serial.addStretch()
+
+        self._populate_serial_combo(preferred=self.serial_port_name)
+
+        self.tabs.addTab(tab_serial, "🔌 Puerto Serial")
+
         # Adjuntar pestañas completas al diseño general
         main_layout.addWidget(self.tabs)
 
@@ -1053,8 +1061,97 @@ class Simulator(QWidget):
             self.reader_thread = threading.Thread(target=self.serial_loop, daemon=True)
             self.reader_thread.start()
             print(f"✅ Simulador escuchando en {port_name}")
+            if hasattr(self, "console_display"):
+                self.log_message(f"Puerto serial conectado en {port_name}.")
+            self._update_serial_status(True, port_name)
         except Exception as e:
-            print(f"❌ Error abriendo puerto: {e}")
+            self.serial_port = None
+            self.running = False
+            print(f"❌ Error abriendo puerto {port_name}: {e}")
+            if hasattr(self, "console_display"):
+                self.log_message(f"Sin puerto serial disponible ({port_name}); modo simulación local activo.")
+            self._update_serial_status(False, port_name, error=str(e))
+
+    def stop_serial(self):
+        self.running = False
+        if self.reader_thread and self.reader_thread.is_alive():
+            self.reader_thread.join(timeout=1.0)
+        if self.serial_port and self.serial_port.is_open:
+            self.serial_port.close()
+        self.serial_port = None
+        self.reader_thread = None
+
+    def _list_serial_ports(self):
+        try:
+            return [p.device for p in serial.tools.list_ports.comports()]
+        except Exception as e:
+            print(f"[SIMULATOR] Error listando puertos: {e}")
+            return []
+
+    def _populate_serial_combo(self, preferred=None, strict=False):
+        """strict=True no aplica fallback al puerto por defecto/primer puerto (usado al refrescar)."""
+        ports = self._list_serial_ports()
+        self.combo_serial_port.blockSignals(True)
+        self.combo_serial_port.clear()
+        self.combo_serial_port.addItems(ports)
+
+        default_port = _default_serial_port_name()
+        selected = None
+        if preferred and preferred in ports:
+            selected = preferred
+        elif not strict:
+            if default_port in ports:
+                selected = default_port
+            elif ports:
+                selected = ports[0]
+
+        if selected:
+            self.combo_serial_port.setCurrentText(selected)
+
+        self.combo_serial_port.blockSignals(False)
+
+    def _refresh_serial_ports(self):
+        current = self.combo_serial_port.currentText()
+        self._populate_serial_combo(preferred=current, strict=True)
+
+    def _apply_serial_settings(self):
+        if not self.chk_serial_enable.isChecked():
+            self.stop_serial()
+            self._update_serial_status(False, self.combo_serial_port.currentText())
+            return
+
+        port_name = self.combo_serial_port.currentText().strip()
+        if not port_name:
+            self._update_serial_status(False, "", error="Ningún puerto seleccionado")
+            return
+
+        if port_name not in self._list_serial_ports():
+            self._update_serial_status(False, port_name, error="El puerto ya no está disponible")
+            return
+
+        self.stop_serial()
+        self.serial_port_name = port_name
+        self.start_serial(port_name)
+
+    def _update_serial_status(self, connected, port_name, error=None):
+        if connected:
+            text = f"Estado: Conectado ({port_name})"
+            style = "color: #16a34a; font-weight: bold; padding: 5px;"
+            info_text = f"Simulador activo - Enlace conectado en {port_name}"
+        elif error:
+            text = f"Estado: Error ({port_name}): {error}"
+            style = "color: #dc2626; font-weight: bold; padding: 5px;"
+            info_text = f"Simulador activo - Enlace desconectado ({error})"
+        else:
+            text = "Estado: Desconectado"
+            style = "color: #7f8c8d; font-weight: bold; padding: 5px;"
+            info_text = "Simulador activo - Enlace desconectado"
+
+        if hasattr(self, "lbl_serial_status"):
+            self.lbl_serial_status.setText(text)
+            self.lbl_serial_status.setStyleSheet(style)
+        if hasattr(self, "info_label"):
+            self.info_label.setText(info_text)
 
     def serial_loop(self):
         buffer = bytearray()
@@ -1291,11 +1388,7 @@ class Simulator(QWidget):
         self.console_display.append(f"[{timestamp}] {message}")
 
     def closeEvent(self, event):
-        self.running = False
-        if self.reader_thread and self.reader_thread.is_alive():
-            self.reader_thread.join(timeout=1.0) # Esperar un poco a que el hilo termine
-        if self.serial_port and self.serial_port.is_open:
-            self.serial_port.close()
+        self.stop_serial()
         print("[SIMULATOR] Simulador cerrado.")
         event.accept()
 
