@@ -9,7 +9,7 @@ import crcmod
 import time
 from PySide6.QtWidgets import (QApplication, QCheckBox, QSpinBox, QWidget, QVBoxLayout, QHBoxLayout,
                                QLabel, QComboBox, QPushButton, QGroupBox,QGridLayout,
-                               QDoubleSpinBox, QSpinBox)
+                               QDoubleSpinBox)
 from PySide6.QtCore import QTimer
 from PySide6.QtCore import Qt, Signal, Slot
 
@@ -336,6 +336,28 @@ def _default_serial_port_name() -> str:
     """Puerto por defecto segun plataforma (Windows usa COMx, Linux/Ubuntu usa /dev/ttyUSB0)."""
     return "COM4" if sys.platform.startswith("win") else "/dev/ttyUSB0"
 
+def get_simulation_mode() -> str:
+    return os.getenv("SIMULATION_MODE", "real").strip().lower()
+
+def get_simulation_port() -> str:
+    configured_port = os.getenv("SIMULATION_SERIAL_PORT", "").strip()
+
+    if configured_port:
+        return configured_port
+
+    if get_simulation_mode() == "simulation":
+        if sys.platform.startswith("linux"):
+            return os.path.expanduser(
+                "~/.hemodialisis/simulador"
+            )
+
+        if sys.platform.startswith("win"):
+            return "COM4"
+
+    return _default_serial_port_name()
+
+    
+
 
 class Simulator(QWidget):
     request_led_update = Signal(int, bool)
@@ -345,7 +367,8 @@ class Simulator(QWidget):
         self.serial_port = None
         self.running = False
         self.reader_thread = None
-        self.serial_port_name = os.environ.get("SIMULATOR_PORT", _default_serial_port_name())
+        # self.serial_port_name = os.environ.get("SIMULATOR_PORT", _default_serial_port_name())
+        self.serial_port_name = get_simulation_port()
 
         self.realistic_mode = True
 
@@ -355,7 +378,11 @@ class Simulator(QWidget):
 
         self._initialize_simulated_values()
         self.setup_ui()
+        self.request_led_update.connect(self.update_led_visuals)
         self.start_serial(self.serial_port_name)
+
+        
+
 
     def _get_var_info(self, group_code: int, var_id: int) -> Dict[str, Any]:
         return VARIABLES.get(group_code, {}).get(var_id, {})
@@ -1083,10 +1110,42 @@ class Simulator(QWidget):
 
     def _list_serial_ports(self):
         try:
-            return [p.device for p in serial.tools.list_ports.comports()]
-        except Exception as e:
-            print(f"[SIMULATOR] Error listando puertos: {e}")
+            ports = [
+                port.device
+                for port in serial.tools.list_ports.comports()
+            ]
+            if (
+                sys.platform.startswith("linux")
+                and get_simulation_mode() == "simulation"
+            ):
+                virtual_port = os.path.expanduser(
+                    "~/.hemodialisis/simulador"
+                )
+
+                if (
+                    os.path.exists(virtual_port)
+                    and virtual_port not in ports
+                ):
+                    ports.append(virtual_port)
+
+            configured_port = os.getenv("SIMULATOR_SERIAL_PORT","").strip()
+
+            if (
+                configured_port
+                and os.path.exists(configured_port)
+                and configured_port not in ports
+            ):
+                ports.append(configured_port)
+
+            return ports
+
+        except Exception as error:
+            print(f"[SIMULATOR] Error listando puertos: {error}")
             return []
+
+
+
+        
 
     def _populate_serial_combo(self, preferred=None, strict=False):
         """strict=True no aplica fallback al puerto por defecto/primer puerto (usado al refrescar)."""
@@ -1210,26 +1269,7 @@ class Simulator(QWidget):
             return False
         return True
 
-    # def _handle_analog_read(self):
-    #     header = b'\x12\xaa\x00'
-    #     analog_payload = b''
-
-    #     for group_code, var_id in ANALOG_MAP:
-    #         value = self.current_simulated_values.get(group_code, {}).get(var_id, 0.0)
-            
-    #         if self.realistic_mode:
-    #             # Añadir pequeño ruido realista
-    #             if "Temp" in VARIABLES.get(group_code, {}).get(var_id, {}).get("name", ""):
-    #                 value += random.uniform(-0.3, 0.3)
-    #             elif "Cond" in VARIABLES.get(group_code, {}).get(var_id, {}).get("name", ""):
-    #                 value += random.uniform(-0.05, 0.05)
-    #             elif "Pres" in VARIABLES.get(group_code, {}).get(var_id, {}).get("name", ""):
-    #                 value += random.uniform(-3, 3)
-
-    #         analog_payload += struct.pack('<d', float(value))
-
-    #     self._send_response(header + analog_payload)
-
+   
 # ====================== NUEVA LÓGICA AUTOMÁTICA ESTADO 7 ======================
     def _auto_handle_filter_fill(self, status_code: int):
         """Cuando llega al estado 7, activa automáticamente el botón de llenado de filtro"""
@@ -1285,20 +1325,6 @@ class Simulator(QWidget):
             pass
 
 
-    # def _handle_boolean_read(self):
-    #     """Genera y envía la respuesta a un comando de lectura booleana."""
-    #     header = b'\x11\x11\x00'
-        
-    #     boolean_payload_bytes = [0] * 60 # 60 boolean values (0x00 to 0x3B)
-    #     if 0x01 in self.current_simulated_values:
-    #         for i in range(60):
-    #             if i in self.current_simulated_values[0x01]:
-    #                 # Usar el valor booleano almacenado en el estado interno
-    #                 boolean_payload_bytes[i] = 1 if self.current_simulated_values[0x01][i] else 0
-    #             # else: default is 0 (False)
-
-    #     payload = bytes(boolean_payload_bytes)
-    #     self._send_response(header + payload)
     def _handle_boolean_read(self):
         """Genera y envía la respuesta booleana"""
         header = b'\x11\x11\x00'
@@ -1311,19 +1337,7 @@ class Simulator(QWidget):
 
         payload = bytes(boolean_payload_bytes)
         self._send_response(header + payload)
-    # def _handle_analog_read(self):
-    #     """Genera y envía la respuesta a un comando de lectura analógica."""
-    #     header = b'\x12\xaa\x00'
-        
-    #     analog_payload_data = b''
-    #     for (group_code, var_id) in ANALOG_MAP:
-    #         value = 0.0 # Default si no se encuentra
-    #         if group_code in self.current_simulated_values and var_id in self.current_simulated_values[group_code]:
-    #             value = self.current_simulated_values[group_code][var_id]
-    #         analog_payload_data += struct.pack('<d', float(value)) # Asegurar que es float para struct.pack
-        
 
-    #     self._send_response(header + analog_payload_data)
 
     def _handle_boolean_write(self, command_data: bytes):
         if len(command_data) != 4:
